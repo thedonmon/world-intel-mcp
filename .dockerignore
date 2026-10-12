@@ -1,0 +1,13 @@
+.git
+.worktrees
+.venv
+venv
+.env*
+**/__pycache__
+.pytest_cache
+.coverage
+htmlcov
+dist
+build
+**/*.db*
+**/*.sqlite3*

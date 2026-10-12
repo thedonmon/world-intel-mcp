@@ -11,9 +11,11 @@ authors = [
 keywords = ["mcp", "intelligence", "osint", "markets", "geopolitical", "phoenix"]
 
 dependencies = [
-    "mcp>=1.8.0,<2.0.0",
+    "mcp>=2.3.0,<3.0.0",
     "httpx[socks]>=0.27.0",
-    "pydantic>=2.10.0,<3.0.0",
+    "pydantic>=2.12.0,<3.0.0",
+    "jsonschema>=4.20.0",
+    "python-dotenv>=1.0.0",
     "feedparser>=6.0.0",
     "click>=8.1.0",
     "jinja2>=3.1.0",
@@ -21,6 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+http = ["uvicorn>=0.29.0"]
 dashboard = ["starlette>=0.37.0", "uvicorn>=0.29.0"]
 vector = ["qdrant-client>=1.7.0", "fastembed>=0.7.0"]
 pdf = ["weasyprint>=62.0"]

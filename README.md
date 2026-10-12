@@ -103,6 +103,40 @@ Add to `~/.claude.json`:
 }
 ```
 
+### Hosted MCP (Streamable HTTP)
+
+This fork uses MCP Python SDK v2 and supports protocol revision `2026-07-28`.
+The HTTP endpoint is `/mcp`; requests are stateless and do not need a session ID.
+SDK-native support for earlier clients is also available. The dashboard's SSE
+feed is separate from this MCP endpoint.
+
+```bash
+pip install -e ".[http]"
+world-intel-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+```
+
+Or build and run the container with a persistent SQLite volume:
+
+```bash
+docker build -t world-intel-mcp .
+docker run --rm -p 127.0.0.1:8000:8000 -v world-intel-data:/data world-intel-mcp
+```
+
+Register it in ToolService with `type: "remote"`, `transport: "streamable_http"`,
+and the service URL ending in `/mcp`. Preview its tools, then select the domains
+to import. `GET /healthz` provides a lightweight readiness/liveness probe.
+
+The service has no built-in access control. Keep it on a private network or
+behind authenticated ingress (such as ForwardAuth). AOIs and source credentials
+are shared by callers of the same instance; use separate databases/instances
+where isolation is needed. Run one replica per SQLite volume.
+
+`WORLD_INTEL_MCP_TRANSPORT`, `WORLD_INTEL_MCP_HOST`, and `WORLD_INTEL_MCP_PORT`
+can replace the CLI options. `WORLD_INTEL_CACHE_DB` sets the SQLite path;
+the container defaults to `/data/cache.db`. Optional provider credentials are
+passed as environment variables. Qdrant, Ollama, and the collector are not
+required to run the MCP endpoint.
+
 ### Dashboard
 
 ```bash

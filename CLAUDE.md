@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-World Intelligence MCP Server: 139 tools across 30+ domains providing real-time global intelligence from free public APIs. Serves four interfaces: MCP stdio (for Claude Code/Cursor), a live Starlette dashboard with SSE, a Click CLI with Rich output, and a collector daemon for 24/7 vector store population. Python 3.11+, built with hatchling.
+World Intelligence MCP Server: 139 tools across 30+ domains providing real-time global intelligence from free public APIs. Serves four interfaces: MCP stdio or Streamable HTTP (SDK v2), a live Starlette dashboard with SSE, a Click CLI with Rich output, and a collector daemon for 24/7 vector store population. Python 3.11+, built with hatchling.
 
 ## Commands
 
@@ -14,6 +14,8 @@ pip install -e ".[dev,dashboard]"
 
 # Run MCP server (stdio mode)
 world-intel-mcp
+# Hosted MCP (requires [http] extra)
+world-intel-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 
 # Run tests (pytest-asyncio, auto mode)
 pytest
@@ -36,7 +38,7 @@ intel-dashboard --port 8501
 Three consumers share the same source modules and infrastructure stack:
 
 ```
-server.py (MCP stdio)  ─┐                                              ┌─ VectorStore (Qdrant)
+server.py (MCP stdio/HTTP)  ─┐                                              ┌─ VectorStore (Qdrant)
 cli.py (Click CLI)      ├─> sources/*.py ─> Fetcher ─> CircuitBreaker ─┤
 dashboard/app.py (SSE)  ─┘    analysis/*.py                            └─ Cache (SQLite)
 collector.py (daemon)  ──┘

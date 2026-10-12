@@ -68,19 +68,28 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 
-from mcp.server import Server
+import click
+import jsonschema
+
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    Tool,
+    TextContent,
+)
 
 logging.basicConfig(
     level=os.environ.get("WORLD_INTEL_LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("world-intel-mcp")
-
-server = Server("world-intel-mcp")
 
 # Shared infrastructure lives in runtime.py (Phase 26 split); the local
 # aliases remain as the module's public face — external readers (and the
@@ -102,6 +111,7 @@ fetcher = _runtime.fetcher
 # ---------------------------------------------------------------------------
 
 TOOLS: list[Tool] = list(_tools_pkg.ALL_TOOLS)
+_TOOL_SCHEMAS = {tool.name: tool.input_schema for tool in TOOLS}
 
 
 # ---------------------------------------------------------------------------
@@ -122,41 +132,108 @@ async def _dispatch(name: str, arguments: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    return TOOLS
+async def list_tools(
+    ctx: ServerRequestContext, params: PaginatedRequestParams | None
+) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-    args = arguments or {}
-    logger.info("Tool call: %s(%s)", name, json.dumps(args, default=str)[:200])
-    result = await _dispatch(name, args)
-    return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+async def call_tool(
+    ctx: ServerRequestContext, params: CallToolRequestParams
+) -> CallToolResult:
+    args = params.arguments or {}
+    logger.info("Tool call: %s(%s)", params.name, json.dumps(args, default=str)[:200])
+    try:
+        if schema := _TOOL_SCHEMAS.get(params.name):
+            jsonschema.validate(args, schema)
+        result = await _dispatch(params.name, args)
+        return CallToolResult(
+            content=[TextContent(text=json.dumps(result, indent=2, default=str))]
+        )
+    except jsonschema.ValidationError as exc:
+        return CallToolResult(
+            is_error=True,
+            content=[TextContent(text=f"Input validation error: {exc.message}")],
+        )
+    except Exception as exc:
+        logger.exception("Tool failed: %s", params.name)
+        return CallToolResult(is_error=True, content=[TextContent(text=str(exc))])
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-async def _run() -> None:
+@asynccontextmanager
+async def lifespan(app: Server):
     logger.info("World Intelligence MCP Server starting (%d tools)", len(TOOLS))
     if _vector_store:
         await _vector_store.start()
         logger.info("Vector store worker started")
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream, write_stream, server.create_initialization_options()
-            )
+        yield
     finally:
         if _vector_store:
             await _vector_store.stop()
 
 
-def run() -> None:
-    asyncio.run(_run())
+server = Server(
+    "world-intel-mcp",
+    lifespan=lifespan,
+    on_list_tools=list_tools,
+    on_call_tool=call_tool,
+    get_tool_input_schema=_TOOL_SCHEMAS.get,
+)
+
+
+def create_http_app(host: str = "127.0.0.1"):
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def health(request):
+        return JSONResponse({"status": "ok"})
+
+    return server.streamable_http_app(
+        host=host,
+        stateless_http=True,
+        json_response=True,
+        custom_starlette_routes=[Route("/healthz", health)],
+    )
+
+
+async def _run() -> None:
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
+
+
+@click.command()
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "streamable-http"]),
+    default="stdio",
+    envvar="WORLD_INTEL_MCP_TRANSPORT",
+    show_default=True,
+)
+@click.option(
+    "--host", default="127.0.0.1", envvar="WORLD_INTEL_MCP_HOST", show_default=True
+)
+@click.option(
+    "--port",
+    default=8000,
+    type=click.IntRange(1, 65535),
+    envvar="WORLD_INTEL_MCP_PORT",
+    show_default=True,
+)
+def run(transport: str, host: str, port: int) -> None:
+    """Serve MCP over stdio or Streamable HTTP at /mcp."""
+    if transport == "stdio":
+        asyncio.run(_run())
+    else:
+        try:
+            import uvicorn
+        except ImportError as exc:
+            raise click.ClickException(
+                'Install HTTP support with pip install ".[http]"'
+            ) from exc
+        uvicorn.run(create_http_app(host), host=host, port=port)
 
 
 if __name__ == "__main__":

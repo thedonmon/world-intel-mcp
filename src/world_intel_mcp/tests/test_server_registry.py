@@ -54,8 +54,8 @@ def test_tool_names_unique_and_conventional(server) -> None:
 def test_every_tool_has_description_and_object_schema(server) -> None:
     for tool in server.TOOLS:
         assert tool.description and tool.description.strip(), tool.name
-        assert isinstance(tool.inputSchema, dict), tool.name
-        assert tool.inputSchema.get("type") == "object", tool.name
+        assert isinstance(tool.input_schema, dict), tool.name
+        assert tool.input_schema.get("type") == "object", tool.name
 
 
 def test_tools_and_dispatch_are_in_one_to_one_parity(server) -> None:
@@ -219,9 +219,13 @@ def test_readme_documents_every_registered_tool(server) -> None:
         rows = re.findall(r"^\| `(intel_[a-z0-9_]+)`", body, re.M)
         count = re.search(r"\((\d+)\)\s*$", header)
         assert count, f"README section without a (n) count: {header}"
-        assert int(count.group(1)) == len(rows), f"README '{header}' says {count.group(1)}, lists {len(rows)}"
+        assert int(count.group(1)) == len(rows), (
+            f"README '{header}' says {count.group(1)}, lists {len(rows)}"
+        )
         listed.extend(rows)
-    assert len(listed) == len(set(listed)), "a tool is listed twice in the README reference"
+    assert len(listed) == len(set(listed)), (
+        "a tool is listed twice in the README reference"
+    )
     assert set(listed) == registered, {
         "undocumented": sorted(registered - set(listed)),
         "documented_but_not_registered": sorted(set(listed) - registered),
@@ -229,3 +233,100 @@ def test_readme_documents_every_registered_tool(server) -> None:
     n = len(server.TOOLS)
     assert f"**{n} MCP tools**" in readme
     assert f"**Total: {n} tools**" in readme
+
+
+@pytest.fixture
+def http_rpc(server):
+    from contextlib import asynccontextmanager
+
+    import httpx
+
+    @asynccontextmanager
+    async def connect(version="2026-07-28"):
+        app = server.create_http_app()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as client:
+
+                async def rpc(method, params):
+                    response = await client.post(
+                        "/mcp",
+                        headers={
+                            "Accept": "application/json, text/event-stream",
+                            "MCP-Protocol-Version": version,
+                            "MCP-Method": method,
+                            **(
+                                {"MCP-Name": params["name"]} if "name" in params else {}
+                            ),
+                        },
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": method,
+                            "params": {
+                                **params,
+                                "_meta": {
+                                    "io.modelcontextprotocol/protocolVersion": version,
+                                    "io.modelcontextprotocol/clientCapabilities": {},
+                                },
+                            },
+                        },
+                    )
+                    assert response.status_code == 200, response.text
+                    assert "mcp-session-id" not in response.headers
+                    return response.json()["result"]
+
+                yield rpc
+
+    return connect
+
+
+@pytest.mark.parametrize("version", ["2026-07-28", "2025-11-25"])
+async def test_http_discovery_and_tools_without_session(http_rpc, version):
+    """Exercise modern and handshake-based clients through the HTTP boundary."""
+    import json
+
+    async with http_rpc(version) as rpc:
+        if version == "2026-07-28":
+            discovered = await rpc("server/discover", {})
+            assert version in discovered["supportedVersions"]
+        else:
+            initialized = await rpc(
+                "initialize",
+                {
+                    "protocolVersion": version,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            )
+            assert initialized["protocolVersion"] == version
+
+        listed = await rpc("tools/list", {})
+        define = next(t for t in listed["tools"] if t["name"] == "intel_aoi_define")
+        assert "lat" in define["inputSchema"]["required"]
+        result = await rpc(
+            "tools/call", {"name": "intel_military_bases", "arguments": {}}
+        )
+        assert not result.get("isError", False)
+        data = json.loads(result["content"][0]["text"])
+        assert any(b["name"] == "Norfolk Naval Station" for b in data["bases"])
+
+        invalid = await rpc("tools/call", {"name": "intel_aoi_define", "arguments": {}})
+        assert invalid["isError"] is True
+        assert "Input validation error" in invalid["content"][0]["text"]
+
+
+async def test_http_handler_failure_remains_a_tool_error(http_rpc, monkeypatch):
+    from world_intel_mcp import tools
+
+    async def unavailable(arguments):
+        raise RuntimeError("source unavailable")
+
+    monkeypatch.setitem(tools.ALL_HANDLERS, "intel_military_bases", unavailable)
+    async with http_rpc() as rpc:
+        result = await rpc(
+            "tools/call", {"name": "intel_military_bases", "arguments": {}}
+        )
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == "source unavailable"
